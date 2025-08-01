@@ -1,3 +1,5 @@
 aiogram==3.5.0
 python-dotenv
 google-generativeai
+pydantic==2.7.3
+
