@@ -1,0 +1,1 @@
+aiogram openai asyncio aiohttp python-dotenv sqlalchemy
