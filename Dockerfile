@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 6. Предварительно скачиваем модель Whisper, чтобы бот стартовал быстро
 # Этот шаг может занять несколько минут во время сборки!
-RUN python -c "import whisper; whisper.load_model('base')"
+RUN python -c "import whisper; whisper.load_model('tiny')"
 
 # 7. Копируем весь остальной код нашего бота в контейнер
 COPY . .

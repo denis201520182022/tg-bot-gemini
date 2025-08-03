@@ -87,7 +87,7 @@ class GeminiClient:
             return "Извините, произошла ошибка при генерации ответа."
 
 class LocalSpeechClient:
-    def __init__(self, model_name="base"):
+    def __init__(self, model_name="tiny"):
         self.model = None
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
