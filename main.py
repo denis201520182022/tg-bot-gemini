@@ -25,7 +25,6 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Создаем папку для временных файлов, если ее нет
 if not os.path.exists("temp"):
     os.makedirs("temp")
 
@@ -35,7 +34,6 @@ logging.basicConfig(level=logging.INFO)
 DEFAULT_SYSTEM_PROMPT = """
 Ты — полезный ассистент в Telegram. Твоя задача — отвечать на запросы пользователя.
 АБСОЛЮТНО ВСЕГДА, без исключений, форматируй свой ответ, используя синтаксис MarkdownV2 для Telegram.
-
 **Правила форматирования:**
 - Жирный: **текст**
 - Курсив: *текст*
@@ -44,10 +42,8 @@ DEFAULT_SYSTEM_PROMPT = """
 - Моноширинный код (инлайн): `текст`
 - Блок с кодом: ```python\nкод\n```
 - Ссылки: [текст](URL)
-
 **ЗАПРЕЩЕНО:**
 - Категорически запрещено использовать заголовки с помощью символов #.
-
 **ОЧЕНЬ ВАЖНО (ЭКРАНИРОВАНИЕ):**
 - Всегда экранируй следующие специальные символы, добавляя перед ними обратный слэш (\\): . ! - = + ( ) { } [ ] | # > _ * ~
 """
@@ -97,17 +93,10 @@ class LocalSpeechClient:
             logging.critical(f"Не удалось загрузить локальную модель Whisper: {e}\nУбедитесь, что у вас установлены 'torch' и 'openai-whisper'.")
 
     async def audio_to_text(self, audio_filepath: str) -> str | None:
-        if not self.model:
-            logging.error("Модель Whisper не загружена.")
-            return None
+        if not self.model: return None
         try:
             use_fp16 = self.model.device.type == 'cuda'
-            result = await asyncio.to_thread(
-                self.model.transcribe,
-                audio_filepath,
-                fp16=use_fp16,
-                language='ru'
-            )
+            result = await asyncio.to_thread(self.model.transcribe, audio_filepath, fp16=use_fp16, language='ru')
             logging.info(f"Распознанный текст: {result['text']}")
             return result['text']
         except Exception as e:
@@ -118,8 +107,7 @@ class TTSClient:
     async def text_to_audio(self, text: str, output_filepath: str) -> bool:
         try:
             clean_text = re.sub(r'[*_`~[\]()\\#+-.!{}]', '', text).replace("```", " ").replace("`", " ")
-            if not clean_text.strip():
-                return False
+            if not clean_text.strip(): return False
             def sync_tts():
                 gTTS(clean_text, lang='ru').save(output_filepath)
                 return True
@@ -203,7 +191,6 @@ async def new_request(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Контекст сброшен. Можете задать новый вопрос.", reply_markup=keyboard)
 
-# ... (Все ваши обработчики состояний и колбэков идут сюда без изменений)
 @router.message(StateFilter(Form.waiting_for_system_prompt))
 async def process_system_prompt(message: types.Message, state: FSMContext):
     await state.update_data(system_prompt=message.text)
@@ -275,7 +262,6 @@ async def handle_voice(message: types.Message, state: FSMContext):
     try:
         file_info = await bot.get_file(voice_file_id)
         await bot.download_file(file_info.file_path, destination=oga_filepath)
-
         audio = await asyncio.to_thread(AudioSegment.from_file, oga_filepath, format="ogg")
         await asyncio.to_thread(audio.export, mp3_filepath, format="mp3")
 
@@ -284,15 +270,12 @@ async def handle_voice(message: types.Message, state: FSMContext):
             await processing_message.edit_text("Не удалось распознать речь в сообщении\\.", parse_mode=ParseMode.MARKDOWN_V2)
             return
 
-        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-        # Экранируем спецсимволы в распознанном тексте перед отправкой
         sanitized_user_text = sanitize_markdown_v2(user_text)
         await processing_message.edit_text(f"Вы сказали: *«{sanitized_user_text}»*\n\n🧠 Думаю над ответом\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
         data = await state.get_data()
         history = data.get('chat_history', [])
-        history.append(f"Пользователь: {user_text}") # В историю сохраняем чистый текст
+        history.append(f"Пользователь: {user_text}")
         chat_prompt = "\n\n".join(history[-7:])
         full_prompt = await prepare_prompt_with_system_message(chat_prompt, state)
         gpt_response = await gemini_client.generate_text(full_prompt)
@@ -308,25 +291,36 @@ async def handle_voice(message: types.Message, state: FSMContext):
 
     except Exception as e:
         logging.error(f"Полная ошибка в handle_voice: {e}")
-        # Проверяем, существует ли еще сообщение, чтобы избежать ошибки при его редактировании
         try:
             await processing_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
         except TelegramBadRequest:
-            pass # Сообщение уже было удалено, ничего страшного
+            pass
     finally:
         for f in [oga_filepath, mp3_filepath, response_audio_path]:
             if os.path.exists(f): os.remove(f)
+
 @router.message(F.text)
 async def chat_with_gpt(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    history = data.get('chat_history', [])
-    history.append(f"Пользователь: {message.text}")
-    chat_prompt = "\n\n".join(history[-7:])
-    full_prompt = await prepare_prompt_with_system_message(chat_prompt, state)
-    gpt_response = await gemini_client.generate_text(full_prompt)
-    history.append(f"Бот: {gpt_response}")
-    await state.update_data(chat_history=history[-10:])
-    await send_formatted_answer(message, gpt_response)
+    thinking_message = await message.answer("🧠 Думаю над вашим запросом\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    try:
+        data = await state.get_data()
+        history = data.get('chat_history', [])
+        history.append(f"Пользователь: {message.text}")
+        chat_prompt = "\n\n".join(history[-7:])
+        full_prompt = await prepare_prompt_with_system_message(chat_prompt, state)
+        gpt_response = await gemini_client.generate_text(full_prompt)
+        history.append(f"Бот: {gpt_response}")
+        await state.update_data(chat_history=history[-10:])
+
+        await thinking_message.delete()
+        await send_formatted_answer(message, gpt_response)
+
+    except Exception as e:
+        logging.error(f"Полная ошибка в chat_with_gpt: {e}")
+        try:
+            await thinking_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        except TelegramBadRequest:
+            pass
 
 # ------------------ Запуск бота ------------------
 async def main():
