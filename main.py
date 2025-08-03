@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import re
+from threading import Thread
+from flask import Flask
 
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.enums import ParseMode
@@ -34,6 +36,7 @@ logging.basicConfig(level=logging.INFO)
 DEFAULT_SYSTEM_PROMPT = """
 Ты — полезный ассистент в Telegram. Твоя задача — отвечать на запросы пользователя.
 АБСОЛЮТНО ВСЕГДА, без исключений, форматируй свой ответ, используя синтаксис MarkdownV2 для Telegram.
+
 **Правила форматирования:**
 - Жирный: **текст**
 - Курсив: *текст*
@@ -42,10 +45,12 @@ DEFAULT_SYSTEM_PROMPT = """
 - Моноширинный код (инлайн): `текст`
 - Блок с кодом: ```python\nкод\n```
 - Ссылки: [текст](URL)
+
 **ЗАПРЕЩЕНО:**
 - Категорически запрещено использовать заголовки с помощью символов #.
+
 **ОЧЕНЬ ВАЖНО (ЭКРАНИРОВАНИЕ):**
-- Всегда экранируй следующие специальные символы, добавляя перед ними обратный слэш (\\): . ! - = + ( ) { } [ ] | # > _ * ~
+- Всегда экранируй следующие специальные символы, добавляя перед ними обратный слэш (\\\\): `._*[]()~>#+-=|{}!`
 """
 
 # ------------------ Клавиатуры ------------------
@@ -148,21 +153,15 @@ def sanitize_markdown_v2(text: str) -> str:
     return text
 
 async def build_gemini_prompt(history: list, new_prompt: str, state: FSMContext) -> str:
-    """
-    Создает структурированный промпт для Gemini, разделяя системную инструкцию,
-    историю диалога и новый запрос пользователя.
-    """
     data = await state.get_data()
     user_system_prompt = data.get("system_prompt")
     
-    # 1. Системная часть
     full_system_prompt_parts = [DEFAULT_SYSTEM_PROMPT]
     if user_system_prompt:
         full_system_prompt_parts.append(f"Дополнительная инструкция от пользователя: {user_system_prompt}")
     
     system_part = "\n\n---\n\n".join(full_system_prompt_parts)
 
-    # 2. Форматируем историю диалога
     history_part = ""
     if history:
         formatted_history = "\n".join(history)
@@ -172,12 +171,10 @@ async def build_gemini_prompt(history: list, new_prompt: str, state: FSMContext)
 {formatted_history}
 ---
 """
-    # 3. Новый запрос
     new_prompt_part = f"""
 **АКТУАЛЬНЫЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ (ответь только на него):**
 {new_prompt}
 """
-    # Собираем все вместе
     return f"{system_part}{history_part}{new_prompt_part}"
 
 async def send_formatted_answer(message: types.Message, text: str):
@@ -363,8 +360,18 @@ async def chat_with_gpt(message: types.Message, state: FSMContext):
         try: await thinking_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
         except TelegramBadRequest: pass
 
-# ------------------ Запуск бота ------------------
-async def main():
+# ------------------ Запуск бота и веб-сервера ------------------
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "I'm alive!"
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+async def start_bot():
     commands = [
         types.BotCommand(command="/start", description="Начать работу"),
         types.BotCommand(command="/help", description="Справка"),
@@ -374,7 +381,11 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
+    web_thread = Thread(target=run_web_server)
+    web_thread.start()
+    
     try:
-        asyncio.run(main())
+        logging.info("Starting bot polling...")
+        asyncio.run(start_bot())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен.")
+        logging.info("Bot stopped.")
