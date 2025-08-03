@@ -1,24 +1,22 @@
-# Базовый образ Python
+# 1. Используем официальный образ Python 3.11
 FROM python:3.11-slim
 
-# Установка системных зависимостей (если потребуется сборка)
-RUN apt-get update && apt-get install -y build-essential curl
+# 2. Устанавливаем системные зависимости, в первую очередь FFMPEG
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Создаем рабочую директорию
+# 3. Устанавливаем рабочую директорию внутри контейнера
 WORKDIR /app
 
-# Копируем файл зависимостей
+# 4. Копируем файл с зависимостями и устанавливаем их
 COPY requirements.txt .
-
-# Устанавливаем зависимости Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь проект
+# 5. Предварительно скачиваем модель Whisper, чтобы бот стартовал быстро
+# Этот шаг может занять несколько минут во время сборки!
+RUN python -c "import whisper; whisper.load_model('base')"
+
+# 6. Копируем весь остальной код нашего бота в контейнер
 COPY . .
 
-# Переменные окружения (можно убрать и использовать .env файл)
-ENV TELEGRAM_TOKEN=8321906655:AAH29bFDJTJuTT5RAcyhT8KtIe3y8CMVAdA
-ENV GEMINI_API_KEY=AIzaSyBaOMBX2anhPUV9tUtwC2taP1KJ3QsFmiM
-
-# Запуск бота
+# 7. Указываем команду для запуска бота при старте контейнера
 CMD ["python", "main.py"]

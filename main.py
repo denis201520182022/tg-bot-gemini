@@ -147,14 +147,38 @@ def sanitize_markdown_v2(text: str) -> str:
         text = re.sub(pattern, replacement, text)
     return text
 
-async def prepare_prompt_with_system_message(prompt: str, state: FSMContext) -> str:
+async def build_gemini_prompt(history: list, new_prompt: str, state: FSMContext) -> str:
+    """
+    Создает структурированный промпт для Gemini, разделяя системную инструкцию,
+    историю диалога и новый запрос пользователя.
+    """
     data = await state.get_data()
     user_system_prompt = data.get("system_prompt")
+    
+    # 1. Системная часть
     full_system_prompt_parts = [DEFAULT_SYSTEM_PROMPT]
     if user_system_prompt:
         full_system_prompt_parts.append(f"Дополнительная инструкция от пользователя: {user_system_prompt}")
-    final_system_part = "\n\n---\n\n".join(full_system_prompt_parts)
-    return f"{final_system_part}\n\n===\n\nЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{prompt}"
+    
+    system_part = "\n\n---\n\n".join(full_system_prompt_parts)
+
+    # 2. Форматируем историю диалога
+    history_part = ""
+    if history:
+        formatted_history = "\n".join(history)
+        history_part = f"""
+---
+**КОНТЕКСТ ПРЕДЫДУЩЕГО ДИАЛОГА (для справки):**
+{formatted_history}
+---
+"""
+    # 3. Новый запрос
+    new_prompt_part = f"""
+**АКТУАЛЬНЫЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ (ответь только на него):**
+{new_prompt}
+"""
+    # Собираем все вместе
+    return f"{system_part}{history_part}{new_prompt_part}"
 
 async def send_formatted_answer(message: types.Message, text: str):
     if not text:
@@ -166,10 +190,12 @@ async def send_formatted_answer(message: types.Message, text: str):
             chunk = sanitized_text[i:i + 4096]
             await message.answer(chunk, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
     except TelegramBadRequest:
+        logging.warning("Ошибка форматирования MarkdownV2. Отправка простого текста.")
         for i in range(0, len(text), 4096):
             chunk = text[i:i + 4096]
             await message.answer(chunk, reply_markup=keyboard)
     except Exception as e:
+        logging.error(f"Неизвестная ошибка при отправке сообщения: {e}")
         await message.answer("Произошла критическая ошибка при отправке ответа.", reply_markup=keyboard)
 
 # ------------------ ОБРАБОТЧИКИ ------------------
@@ -180,7 +206,7 @@ async def handle_commands(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer("Привет! Я бот на основе Gemini. Задайте вопрос текстом, голосом или выберите опцию:", reply_markup=inline_keyboard)
     elif command == "/help":
-        help_text = "*Справка по боту*\n\n`/start` \\- Перезапустить бота\\.\n`/help` \\- Показать это сообщение\\.\n`/setting` \\- Задать роль для ИИ\\.\n\nВы можете общаться со мной как текстом, так и *голосовыми сообщениями*\\."
+        help_text = "*Справка по боту*\n\n`/start` \\- Перезапустить бота и сбросить контекст\\.\n`/help` \\- Показать это сообщение\\.\n`/setting` \\- Задать *дополнительную* системную инструкцию \\(роль\\) для ИИ\\.\n\nВы можете общаться со мной как текстом, так и *голосовыми сообщениями*\\."
         await message.answer(help_text, parse_mode=ParseMode.MARKDOWN_V2)
     elif command == "/setting":
         await state.set_state(Form.waiting_for_system_prompt)
@@ -199,42 +225,52 @@ async def process_system_prompt(message: types.Message, state: FSMContext):
 
 @router.message(StateFilter(Form.waiting_for_startup_area))
 async def process_startup_area(message: types.Message, state: FSMContext):
+    thinking_message = await message.answer("💡 Генерирую идею для стартапа\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
     user_prompt = f"Придумай и подробно опиши идею для стартапа в сфере: {message.text}"
-    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    full_prompt = await build_gemini_prompt([], user_prompt, state)
     gpt_response = await gemini_client.generate_text(full_prompt)
+    await thinking_message.delete()
     await send_formatted_answer(message, gpt_response)
 
 @router.message(StateFilter(Form.waiting_for_poem_topic))
 async def process_poem_topic(message: types.Message, state: FSMContext):
+    thinking_message = await message.answer("✍️ Пишу стих\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
     user_prompt = f"Напиши красивый стих на тему: {message.text}"
-    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    full_prompt = await build_gemini_prompt([], user_prompt, state)
     gpt_response = await gemini_client.generate_text(full_prompt)
+    await thinking_message.delete()
     await send_formatted_answer(message, gpt_response)
 
 @router.message(StateFilter(Form.waiting_for_story_prompt))
 async def process_story_prompt(message: types.Message, state: FSMContext):
+    thinking_message = await message.answer("📝 Сочиняю рассказ\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
     user_prompt = f"Напиши интересный короткий рассказ на тему: {message.text}"
-    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    full_prompt = await build_gemini_prompt([], user_prompt, state)
     gpt_response = await gemini_client.generate_text(full_prompt)
+    await thinking_message.delete()
     await send_formatted_answer(message, gpt_response)
 
 @router.message(StateFilter(Form.waiting_for_travel_details))
 async def process_travel_details(message: types.Message, state: FSMContext):
+    thinking_message = await message.answer("✈️ Планирую путешествие\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
     user_prompt = f"Составь подробный и интересный план путешествия. Детали от пользователя: {message.text}."
-    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    full_prompt = await build_gemini_prompt([], user_prompt, state)
     gpt_response = await gemini_client.generate_text(full_prompt)
+    await thinking_message.delete()
     await send_formatted_answer(message, gpt_response)
 
 @router.message(StateFilter(Form.waiting_for_ingredients))
 async def process_ingredients(message: types.Message, state: FSMContext):
+    thinking_message = await message.answer("🍳 Ищу рецепт\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
     user_prompt = f"Придумай подробный рецепт, используя следующие ингредиенты: {message.text}."
-    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    full_prompt = await build_gemini_prompt([], user_prompt, state)
     gpt_response = await gemini_client.generate_text(full_prompt)
+    await thinking_message.delete()
     await send_formatted_answer(message, gpt_response)
 
 @router.callback_query(lambda c: c.data in ["idea", "poem", "story", "travel", "recipe"])
@@ -245,7 +281,7 @@ async def process_callbacks(callback_query: types.CallbackQuery, state: FSMConte
         "poem": ("На какую тему написать стих?", Form.waiting_for_poem_topic),
         "story": ("О чем написать рассказ?", Form.waiting_for_story_prompt),
         "travel": ("Куда и на сколько дней вы хотите поехать?", Form.waiting_for_travel_details),
-        "recipe": ("Какие ингредиенты у вас есть?", Form.waiting_for_ingredients)
+        "recipe": ("Какие ингредиенты у вас есть? (перечислите через запятую)", Form.waiting_for_ingredients)
     }
     text, new_state = actions[callback_query.data]
     await bot.send_message(callback_query.from_user.id, text, reply_markup=ReplyKeyboardRemove())
@@ -275,26 +311,28 @@ async def handle_voice(message: types.Message, state: FSMContext):
 
         data = await state.get_data()
         history = data.get('chat_history', [])
+
+        full_prompt = await build_gemini_prompt(history, user_text, state)
+        raw_response = await gemini_client.generate_text(full_prompt)
+        clean_response = raw_response.strip()
+        if clean_response.lower().startswith("бот:"):
+            clean_response = clean_response[4:].lstrip()
+
         history.append(f"Пользователь: {user_text}")
-        chat_prompt = "\n\n".join(history[-7:])
-        full_prompt = await prepare_prompt_with_system_message(chat_prompt, state)
-        gpt_response = await gemini_client.generate_text(full_prompt)
-        history.append(f"Бот: {gpt_response}")
+        history.append(f"Бот: {clean_response}")
         await state.update_data(chat_history=history[-10:])
 
         await processing_message.delete()
-        await send_formatted_answer(message, gpt_response)
+        await send_formatted_answer(message, clean_response)
 
-        tts_success = await tts_client.text_to_audio(gpt_response, response_audio_path)
+        tts_success = await tts_client.text_to_audio(clean_response, response_audio_path)
         if tts_success and os.path.exists(response_audio_path):
             await message.answer_voice(FSInputFile(response_audio_path))
 
     except Exception as e:
         logging.error(f"Полная ошибка в handle_voice: {e}")
-        try:
-            await processing_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
-        except TelegramBadRequest:
-            pass
+        try: await processing_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        except TelegramBadRequest: pass
     finally:
         for f in [oga_filepath, mp3_filepath, response_audio_path]:
             if os.path.exists(f): os.remove(f)
@@ -305,22 +343,25 @@ async def chat_with_gpt(message: types.Message, state: FSMContext):
     try:
         data = await state.get_data()
         history = data.get('chat_history', [])
+        
+        full_prompt = await build_gemini_prompt(history, message.text, state)
+        
+        raw_response = await gemini_client.generate_text(full_prompt)
+        clean_response = raw_response.strip()
+        if clean_response.lower().startswith("бот:"):
+            clean_response = clean_response[4:].lstrip()
+        
         history.append(f"Пользователь: {message.text}")
-        chat_prompt = "\n\n".join(history[-7:])
-        full_prompt = await prepare_prompt_with_system_message(chat_prompt, state)
-        gpt_response = await gemini_client.generate_text(full_prompt)
-        history.append(f"Бот: {gpt_response}")
+        history.append(f"Бот: {clean_response}")
         await state.update_data(chat_history=history[-10:])
 
         await thinking_message.delete()
-        await send_formatted_answer(message, gpt_response)
+        await send_formatted_answer(message, clean_response)
 
     except Exception as e:
         logging.error(f"Полная ошибка в chat_with_gpt: {e}")
-        try:
-            await thinking_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
-        except TelegramBadRequest:
-            pass
+        try: await thinking_message.edit_text("Произошла непредвиденная ошибка при обработке\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        except TelegramBadRequest: pass
 
 # ------------------ Запуск бота ------------------
 async def main():
