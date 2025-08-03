@@ -50,9 +50,19 @@ DEFAULT_SYSTEM_PROMPT = """
 button_new_request = KeyboardButton(text="✅ Новый запрос")
 keyboard = ReplyKeyboardMarkup(keyboard=[[button_new_request]], resize_keyboard=True, input_field_placeholder="Задайте вопрос...")
 
+# --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
 button_idea = InlineKeyboardButton(text="💡 Идея для стартапа", callback_data="idea")
 button_poem = InlineKeyboardButton(text="✍️ Напиши стих", callback_data="poem")
-inline_keyboard = InlineKeyboardMarkup(inline_keyboard=[[button_idea], [button_poem]])
+button_story = InlineKeyboardButton(text="📝 Написать рассказ", callback_data="story")
+button_travel = InlineKeyboardButton(text="✈️ Спланировать путешествие", callback_data="travel")
+button_recipe = InlineKeyboardButton(text="🍳 Рецепт по ингредиентам", callback_data="recipe")
+
+# Размещаем кнопки в более удобной сетке 2x2 + 1
+inline_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [button_idea, button_poem],
+    [button_story, button_travel],
+    [button_recipe]
+])
 
 # ------------------ Клиент Gemini ------------------
 class GeminiClient:
@@ -90,6 +100,11 @@ class Form(StatesGroup):
     waiting_for_startup_area = State()
     waiting_for_poem_topic = State()
     waiting_for_system_prompt = State()
+    # --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
+    waiting_for_story_prompt = State()
+    waiting_for_travel_details = State()
+    waiting_for_ingredients = State()
+
 
 # ------------------ Вспомогательные функции ------------------
 
@@ -139,7 +154,6 @@ async def send_formatted_answer(message: types.Message, text: str):
 
 @router.message(Command(commands=["start", "help", "setting"]))
 async def handle_commands(message: types.Message, state: FSMContext):
-    # ИСПРАВЛЕНО: Возвращена корректная логика обработки команд
     command = message.text.split()[0] 
     
     if command == "/start":
@@ -185,7 +199,33 @@ async def process_poem_topic(message: types.Message, state: FSMContext):
     gpt_response = await gemini_client.generate_text(full_prompt)
     await send_formatted_answer(message, gpt_response)
 
-@router.callback_query(lambda c: c.data in ["idea", "poem"])
+# --- ИЗМЕНЕНИЯ ЗДЕСЬ: НОВЫЕ ОБРАБОТЧИКИ СОСТОЯНИЙ ---
+@router.message(StateFilter(Form.waiting_for_story_prompt))
+async def process_story_prompt(message: types.Message, state: FSMContext):
+    await state.set_state(None)
+    user_prompt = f"Напиши интересный короткий рассказ на тему: {message.text}"
+    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    gpt_response = await gemini_client.generate_text(full_prompt)
+    await send_formatted_answer(message, gpt_response)
+
+@router.message(StateFilter(Form.waiting_for_travel_details))
+async def process_travel_details(message: types.Message, state: FSMContext):
+    await state.set_state(None)
+    user_prompt = f"Составь подробный и интересный план путешествия. Детали от пользователя: {message.text}. Предложи места для посещения, тайминг и возможные активности."
+    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    gpt_response = await gemini_client.generate_text(full_prompt)
+    await send_formatted_answer(message, gpt_response)
+
+@router.message(StateFilter(Form.waiting_for_ingredients))
+async def process_ingredients(message: types.Message, state: FSMContext):
+    await state.set_state(None)
+    user_prompt = f"Придумай подробный рецепт, используя следующие ингредиенты: {message.text}. Укажи название блюда, полный список нужных ингредиентов (включая те, что я назвал), пошаговую инструкцию и примерное время приготовления."
+    full_prompt = await prepare_prompt_with_system_message(user_prompt, state)
+    gpt_response = await gemini_client.generate_text(full_prompt)
+    await send_formatted_answer(message, gpt_response)
+# --- КОНЕЦ НОВЫХ ОБРАБОТЧИКОВ ---
+
+@router.callback_query(lambda c: c.data in ["idea", "poem", "story", "travel", "recipe"])
 async def process_callbacks(callback_query: types.CallbackQuery, state: FSMContext):
     await bot.answer_callback_query(callback_query.id)
     if callback_query.data == "idea":
@@ -194,6 +234,16 @@ async def process_callbacks(callback_query: types.CallbackQuery, state: FSMConte
     elif callback_query.data == "poem":
         await bot.send_message(callback_query.from_user.id, "На какую тему написать стих?", reply_markup=ReplyKeyboardRemove())
         await state.set_state(Form.waiting_for_poem_topic)
+    # --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
+    elif callback_query.data == "story":
+        await bot.send_message(callback_query.from_user.id, "О чем написать рассказ? Задайте тему или персонажей.", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(Form.waiting_for_story_prompt)
+    elif callback_query.data == "travel":
+        await bot.send_message(callback_query.from_user.id, "Куда и на сколько дней вы хотите поехать?", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(Form.waiting_for_travel_details)
+    elif callback_query.data == "recipe":
+        await bot.send_message(callback_query.from_user.id, "Какие ингредиенты у вас есть? (перечислите через запятую)", reply_markup=ReplyKeyboardRemove())
+        await state.set_state(Form.waiting_for_ingredients)
 
 @router.message()
 async def chat_with_gpt(message: types.Message, state: FSMContext):
