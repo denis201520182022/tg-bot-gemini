@@ -4,6 +4,7 @@ import os
 import re
 from threading import Thread
 from flask import Flask
+import requests
 
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.enums import ParseMode
@@ -19,13 +20,14 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from gtts import gTTS
 from pydub import AudioSegment
-import torch
-import whisper
+
 
 # ------------------ Конфигурация ------------------
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
+HF_MODEL_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3"
 
 if not os.path.exists("temp"):
     os.makedirs("temp")
@@ -36,7 +38,6 @@ logging.basicConfig(level=logging.INFO)
 DEFAULT_SYSTEM_PROMPT = """
 Ты — полезный ассистент в Telegram. Твоя задача — отвечать на запросы пользователя.
 АБСОЛЮТНО ВСЕГДА, без исключений, форматируй свой ответ, используя синтаксис MarkdownV2 для Telegram.
-
 **Правила форматирования:**
 - Жирный: **текст**
 - Курсив: *текст*
@@ -45,10 +46,8 @@ DEFAULT_SYSTEM_PROMPT = """
 - Моноширинный код (инлайн): `текст`
 - Блок с кодом: ```python\nкод\n```
 - Ссылки: [текст](URL)
-
 **ЗАПРЕЩЕНО:**
 - Категорически запрещено использовать заголовки с помощью символов #.
-
 **ОЧЕНЬ ВАЖНО (ЭКРАНИРОВАНИЕ):**
 - Всегда экранируй следующие специальные символы, добавляя перед ними обратный слэш (\\\\): `._*[]()~>#+-=|{}!`
 """
@@ -86,26 +85,47 @@ class GeminiClient:
             logging.error(f"Ошибка при генерации текста Gemini: {e}")
             return "Извините, произошла ошибка при генерации ответа."
 
-class LocalSpeechClient:
-    def __init__(self, model_name="tiny"):
-        self.model = None
-        try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            logging.info(f"Загрузка локальной модели Whisper '{model_name}' на устройстве '{device}'...")
-            self.model = whisper.load_model(model_name, device=device)
-            logging.info("Модель Whisper успешно загружена.")
-        except Exception as e:
-            logging.critical(f"Не удалось загрузить локальную модель Whisper: {e}\nУбедитесь, что у вас установлены 'torch' и 'openai-whisper'.")
+class SpeechClient:
+    def __init__(self, api_token: str, model_url: str):
+        self.api_token = api_token
+        self.model_url = model_url
+        # --- ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+        self.headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "audio/mpeg"
+        }
 
     async def audio_to_text(self, audio_filepath: str) -> str | None:
-        if not self.model: return None
+        if not self.api_token:
+            logging.error("Токен Hugging Face не предоставлен.")
+            return None
+            
         try:
-            use_fp16 = self.model.device.type == 'cuda'
-            result = await asyncio.to_thread(self.model.transcribe, audio_filepath, fp16=use_fp16, language='ru')
-            logging.info(f"Распознанный текст: {result['text']}")
-            return result['text']
+            logging.info(f"Attempting to call Hugging Face API with URL: {self.model_url}")
+
+            with open(audio_filepath, "rb") as f:
+                data = f.read()
+            response = await asyncio.to_thread(
+                requests.post, self.model_url, headers=self.headers, data=data
+            )
+            
+            if response.status_code != 200:
+                if response.status_code == 503:
+                    logging.warning(f"Модель на Hugging Face загружается. Повторите попытку через минуту. Ответ: {response.text}")
+                    return "Модель для распознавания речи сейчас загружается, подождите минуту и попробуйте снова."
+                
+                logging.error(f"Ошибка API Hugging Face: {response.status_code} - {response.text}")
+                return None
+
+            result = response.json()
+            if 'text' in result:
+                logging.info(f"Распознанный текст: {result['text']}")
+                return result['text']
+            else:
+                logging.error(f"Неожиданный формат ответа от API: {result}")
+                return None
         except Exception as e:
-            logging.error(f"Ошибка при локальной транскрибации аудио: {e}")
+            logging.error(f"Ошибка при обращении к Hugging Face API: {e}")
             return None
 
 class TTSClient:
@@ -122,11 +142,11 @@ class TTSClient:
             return False
 
 # ------------------ Инициализация ------------------
-if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
-    raise ValueError("Не найдены переменные окружения TELEGRAM_TOKEN или GEMINI_API_KEY")
+if not TELEGRAM_TOKEN or not GEMINI_API_KEY or not HF_TOKEN:
+    raise ValueError("Не найдены переменные окружения TELEGRAM_TOKEN, GEMINI_API_KEY или HF_TOKEN")
 
 gemini_client = GeminiClient(GEMINI_API_KEY)
-local_speech_client = LocalSpeechClient(model_name="base")
+speech_client = SpeechClient(api_token=HF_TOKEN, model_url=HF_MODEL_URL)
 tts_client = TTSClient()
 storage = MemoryStorage()
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -155,13 +175,10 @@ def sanitize_markdown_v2(text: str) -> str:
 async def build_gemini_prompt(history: list, new_prompt: str, state: FSMContext) -> str:
     data = await state.get_data()
     user_system_prompt = data.get("system_prompt")
-    
     full_system_prompt_parts = [DEFAULT_SYSTEM_PROMPT]
     if user_system_prompt:
         full_system_prompt_parts.append(f"Дополнительная инструкция от пользователя: {user_system_prompt}")
-    
     system_part = "\n\n---\n\n".join(full_system_prompt_parts)
-
     history_part = ""
     if history:
         formatted_history = "\n".join(history)
@@ -220,55 +237,45 @@ async def process_system_prompt(message: types.Message, state: FSMContext):
     await state.set_state(None)
     await message.answer("✅ Дополнительная системная инструкция установлена.", reply_markup=keyboard)
 
+async def handle_callback_logic(message: types.Message, state: FSMContext, user_prompt: str):
+    full_prompt = await build_gemini_prompt([], user_prompt, state)
+    gpt_response = await gemini_client.generate_text(full_prompt)
+    await send_formatted_answer(message, gpt_response)
+
 @router.message(StateFilter(Form.waiting_for_startup_area))
 async def process_startup_area(message: types.Message, state: FSMContext):
     thinking_message = await message.answer("💡 Генерирую идею для стартапа\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
-    user_prompt = f"Придумай и подробно опиши идею для стартапа в сфере: {message.text}"
-    full_prompt = await build_gemini_prompt([], user_prompt, state)
-    gpt_response = await gemini_client.generate_text(full_prompt)
     await thinking_message.delete()
-    await send_formatted_answer(message, gpt_response)
+    await handle_callback_logic(message, state, f"Придумай и подробно опиши идею для стартапа в сфере: {message.text}")
 
 @router.message(StateFilter(Form.waiting_for_poem_topic))
 async def process_poem_topic(message: types.Message, state: FSMContext):
     thinking_message = await message.answer("✍️ Пишу стих\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
-    user_prompt = f"Напиши красивый стих на тему: {message.text}"
-    full_prompt = await build_gemini_prompt([], user_prompt, state)
-    gpt_response = await gemini_client.generate_text(full_prompt)
     await thinking_message.delete()
-    await send_formatted_answer(message, gpt_response)
+    await handle_callback_logic(message, state, f"Напиши красивый стих на тему: {message.text}")
 
 @router.message(StateFilter(Form.waiting_for_story_prompt))
 async def process_story_prompt(message: types.Message, state: FSMContext):
     thinking_message = await message.answer("📝 Сочиняю рассказ\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
-    user_prompt = f"Напиши интересный короткий рассказ на тему: {message.text}"
-    full_prompt = await build_gemini_prompt([], user_prompt, state)
-    gpt_response = await gemini_client.generate_text(full_prompt)
     await thinking_message.delete()
-    await send_formatted_answer(message, gpt_response)
+    await handle_callback_logic(message, state, f"Напиши интересный короткий рассказ на тему: {message.text}")
 
 @router.message(StateFilter(Form.waiting_for_travel_details))
 async def process_travel_details(message: types.Message, state: FSMContext):
     thinking_message = await message.answer("✈️ Планирую путешествие\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
-    user_prompt = f"Составь подробный и интересный план путешествия. Детали от пользователя: {message.text}."
-    full_prompt = await build_gemini_prompt([], user_prompt, state)
-    gpt_response = await gemini_client.generate_text(full_prompt)
     await thinking_message.delete()
-    await send_formatted_answer(message, gpt_response)
+    await handle_callback_logic(message, state, f"Составь подробный и интересный план путешествия. Детали от пользователя: {message.text}.")
 
 @router.message(StateFilter(Form.waiting_for_ingredients))
 async def process_ingredients(message: types.Message, state: FSMContext):
     thinking_message = await message.answer("🍳 Ищу рецепт\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     await state.set_state(None)
-    user_prompt = f"Придумай подробный рецепт, используя следующие ингредиенты: {message.text}."
-    full_prompt = await build_gemini_prompt([], user_prompt, state)
-    gpt_response = await gemini_client.generate_text(full_prompt)
     await thinking_message.delete()
-    await send_formatted_answer(message, gpt_response)
+    await handle_callback_logic(message, state, f"Придумай подробный рецепт, используя следующие ингредиенты: {message.text}.")
 
 @router.callback_query(lambda c: c.data in ["idea", "poem", "story", "travel", "recipe"])
 async def process_callbacks(callback_query: types.CallbackQuery, state: FSMContext):
@@ -298,9 +305,13 @@ async def handle_voice(message: types.Message, state: FSMContext):
         audio = await asyncio.to_thread(AudioSegment.from_file, oga_filepath, format="ogg")
         await asyncio.to_thread(audio.export, mp3_filepath, format="mp3")
 
-        user_text = await local_speech_client.audio_to_text(mp3_filepath)
+        user_text = await speech_client.audio_to_text(mp3_filepath)
         if not user_text:
             await processing_message.edit_text("Не удалось распознать речь в сообщении\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+
+        if "загружается" in user_text:
+            await processing_message.edit_text(sanitize_markdown_v2(user_text), parse_mode=ParseMode.MARKDOWN_V2)
             return
 
         sanitized_user_text = sanitize_markdown_v2(user_text)
